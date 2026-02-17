@@ -1,0 +1,18 @@
+name: clinical_summ
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pandas
+  - numpy
+  - pip
+  - pip:
+    - google-cloud-aiplatform
+    - google-cloud-bigquery
+    - tiktoken
+    - transformers
+    - tqdm
+    - python-dateutil
+    - pyarrow
+    
