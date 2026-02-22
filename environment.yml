@@ -15,4 +15,7 @@ dependencies:
     - tqdm
     - python-dateutil
     - pyarrow
+    - google-generativeai
+    - sentence-transformers
+    - faiss-cpu
     

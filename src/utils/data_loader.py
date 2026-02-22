@@ -39,8 +39,7 @@ class DataLoader:
         print(f"Extracting target schema from {self.gt_path}...")
         try:
             with open(self.gt_path, 'r', encoding='utf-8') as f:
-                for i, line in enumerate(f):
-                    if i > 100: break
+                for line in f:
                     try:
                         record = json.loads(line)
                         if 'annotations' in record:
@@ -139,7 +138,7 @@ class DataLoader:
             unified['_base_id'] = None
 
         n_unique = unified['_base_id'].nunique() if id_col else '?'
-        print(f"\n  ✓ Unified table: {len(unified)} total rows, "
+        print(f"\n  [OK] Unified table: {len(unified)} total rows, "
               f"{n_unique} unique base IDs")
         return unified
 
@@ -198,30 +197,32 @@ class DataLoader:
               f"({matched_df['_base_id'].nunique()} unique patients).")
 
         # --- Step 4: Build patient objects ---
-        merged_patients = []
-        found_ids = set()  # tracks _base_id to avoid duplicates
+        # Collect ALL notes per base_id (en + it + ...) instead of first-match-wins
+        patient_map = {}  # base_id -> patient_obj with accumulated notes
 
         for _, row in matched_df.iterrows():
             base_id = row['_base_id']
-            if base_id in found_ids:
-                continue
 
-            patient_obj = gt_lookup[base_id].copy()
+            if base_id not in patient_map:
+                patient_map[base_id] = gt_lookup[base_id].copy()
+                patient_map[base_id]['notes'] = []
 
-            # Attach clinical note text if available
+            # Append clinical note text from every shard (en, it, etc.)
             if text_col and text_col in row.index and pd.notna(row[text_col]):
-                anchor_time = patient_obj.get('admission_time', '2026-01-01')
-                patient_obj['notes'] = [{
+                anchor_time = patient_map[base_id].get('admission_time', '2026-01-01')
+                lang_tag = row.get('_source_shard', 'unknown')
+                patient_map[base_id]['notes'].append({
                     'timestamp': anchor_time,
-                    'text': row[text_col]
-                }]
+                    'text': row[text_col],
+                    'source': lang_tag
+                })
 
-            merged_patients.append(patient_obj)
-            found_ids.add(base_id)
+        merged_patients = list(patient_map.values())
+        found_ids = set(patient_map.keys())
 
         unmatched = set(gt_lookup.keys()) - found_ids
         if unmatched:
-            print(f"\n  ⚠  {len(unmatched)} GT patients had no matching parquet row.")
+            print(f"\n  [WARN] {len(unmatched)} GT patients had no matching parquet row.")
             print(f"     Sample unmatched GT IDs: {list(unmatched)[:5]}")
 
         print(f"\nSuccessfully merged {len(merged_patients)} documents.")

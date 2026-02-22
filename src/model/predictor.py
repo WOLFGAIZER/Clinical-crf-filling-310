@@ -6,10 +6,7 @@ import argparse
 from argparse import ArgumentTypeError
 from pathlib import Path
 from tqdm import tqdm
-from google.cloud import bigquery
-import vertexai
-from vertexai.generative_models import GenerativeModel
-import vertexai.preview.generative_models as generative_models
+import google.generativeai as genai
 from typing import Dict, Optional
 
 import src.utils.utils as utils
@@ -18,13 +15,6 @@ generation_config = {
     "max_output_tokens": 8192,
     "temperature": 1,
     "top_p": 0.95,
-}
-
-safety_settings = {
-    generative_models.HarmCategory.HARM_CATEGORY_HATE_SPEECH: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    generative_models.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    generative_models.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    generative_models.HarmCategory.HARM_CATEGORY_HARASSMENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
 }
 
 def merge_jsonl_files(input_folder, output_file):
@@ -70,12 +60,17 @@ def validate_ehr_context(value):
     
 
 async def generate_async(prompt, model, max_retries=3, initial_delay=1):
+    loop = asyncio.get_event_loop()
     for attempt in range(max_retries):
         try:
-            response = model.generate_content(
-                contents=prompt,
-                generation_config={"response_mime_type": "application/json"},
-                stream=False
+            # Wrap the synchronous SDK call so it doesn't block the event loop
+            response = await loop.run_in_executor(
+                None,
+                lambda: model.generate_content(
+                    contents=prompt,
+                    generation_config={"response_mime_type": "application/json"},
+                    stream=False
+                )
             )
             try:
                 json_response = json.loads(response.text)
@@ -162,8 +157,8 @@ async def process_single_timeline(timeline, args, model, semaphore, windowed_jso
         return None
 
 async def process_timelines(merged_jsonl_file, args, windowed_jsonl_file):
-    vertexai.init(project=args.project_id, location=args.location)
-    model = GenerativeModel(args.model_name)
+    genai.configure(api_key=args.api_key)
+    model = genai.GenerativeModel(args.model_name)
     semaphore = asyncio.Semaphore(args.max_concurrent_calls)
 
     with open(merged_jsonl_file, 'r') as f:
