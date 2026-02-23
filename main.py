@@ -184,16 +184,22 @@ def format_as_official_submission(results, target_items, language="en"):
     """
     submission_records = []
 
-    # Build lookup for results
-    results_lookup = {str(r['patient_id']): r.get('predictions', {}) for r in results}
+    # Build lookup for results - use stripped IDs
+    results_lookup = {str(r['patient_id']).strip(): r.get('predictions', {}) for r in results}
 
     for pid, predictions in results_lookup.items():
-        doc_id = f"{pid}_{language}"
+        # Remove language suffix if already present in pid to avoid e.g. 123_en_en
+        base_pid = pid.split('_')[0]
+        doc_id = f"{base_pid}_{language}"
+
+        # Case-insensitive lookup for predictions
+        norm_predictions = {str(k).lower().strip(): v for k, v in predictions.items()}
 
         pred_list = []
         for item in target_items:
-            # Look up prediction for this item
-            val_obj = predictions.get(item, "unknown")
+            item_lower = item.lower().strip()
+            # Look up prediction for this item (case-insensitive)
+            val_obj = norm_predictions.get(item_lower, "unknown")
 
             # Extract value if it's a dict (our internal format)
             if isinstance(val_obj, dict):
@@ -201,7 +207,7 @@ def format_as_official_submission(results, target_items, language="en"):
             else:
                 val = str(val_obj)
 
-            # Normalize
+            # Normalize predicted value
             val = val.strip().lower() if val else "unknown"
             if not val:
                 val = "unknown"
@@ -244,19 +250,23 @@ def evaluate_predictions(results, gt_path):
             if not line:
                 continue
             rec = json.loads(line)
-            doc_id = str(rec['document_id'])
+            # Use base ID for matching
+            doc_id = str(rec['document_id']).strip().split('_')[0]
             gt[doc_id] = {a['item']: a['ground_truth'] for a in rec.get('annotations', [])}
 
     # --- Build prediction lookup ---
     preds = {}
     for r in results:
-        doc_id = str(r.get('patient_id', 'unknown'))
+        # Use base ID for matching
+        doc_id = str(r.get('patient_id', 'unknown')).strip().split('_')[0]
         items = {}
         for item_name, item_val in r.get('predictions', {}).items():
+            # Store keys in lowercase for case-insensitive matching
+            key = str(item_name).lower().strip()
             if isinstance(item_val, dict):
-                items[item_name] = item_val.get('value', str(item_val))
+                items[key] = item_val.get('value', str(item_val))
             else:
-                items[item_name] = str(item_val)
+                items[key] = str(item_val)
         preds[doc_id] = items
 
     # --- Collect all unique items ---
@@ -279,7 +289,8 @@ def evaluate_predictions(results, gt_path):
 
         for item_name, gt_val in gt_items.items():
             gt_norm = _normalise(gt_val)
-            pred_val = pred_items.get(item_name)
+            # Match item name in lowercase
+            pred_val = pred_items.get(item_name.lower().strip())
             pred_norm = _normalise(pred_val) if pred_val is not None else ""
 
             total_comparisons += 1

@@ -46,15 +46,18 @@ def load_pipeline_output(output_path: str) -> dict:
 
     lookup = {}
     for r in results:
-        pid = str(r.get("patient_id", "unknown"))
+        # Use base ID for matching
+        pid = str(r.get("patient_id", "unknown")).strip().split('_')[0]
         preds = r.get("predictions", {})
         # Flatten: handle both {"item": {"value": "y"}} and {"item": "y"}
+        # Also lowercase keys for robust matching
         flat = {}
         for item_name, item_val in preds.items():
+            key = str(item_name).lower().strip()
             if isinstance(item_val, dict):
-                flat[item_name] = str(item_val.get("value", "unknown"))
+                flat[key] = str(item_val.get("value", "unknown"))
             else:
-                flat[item_name] = str(item_val)
+                flat[key] = str(item_val)
         lookup[pid] = flat
     return lookup
 
@@ -76,8 +79,10 @@ def convert(gt_records: list, pipeline_lookup: dict, language: str) -> list:
         doc_id = str(gt_rec["document_id"])
         annotations = gt_rec.get("annotations", [])
 
+        # Use base ID for matching
+        base_doc_id = doc_id.strip().split('_')[0]
         # Look up our predictions for this patient
-        preds = pipeline_lookup.get(doc_id, {})
+        preds = pipeline_lookup.get(base_doc_id, {})
 
         if preds:
             matched += 1
@@ -88,7 +93,8 @@ def convert(gt_records: list, pipeline_lookup: dict, language: str) -> list:
         pred_list = []
         for ann in annotations:
             item_name = ann["item"]
-            predicted_value = preds.get(item_name, "unknown")
+            # Case-insensitive lookup
+            predicted_value = preds.get(item_name.lower().strip(), "unknown")
 
             # Normalize: strip whitespace, lowercase
             predicted_value = predicted_value.strip().lower() if predicted_value else "unknown"
