@@ -20,7 +20,7 @@ except ImportError:
 import google.generativeai as genai
 
 # --- CONFIG ---
-API_KEY = "AIzaSyAkgKha4IxsCjRXbeirhyoygT9Qmr4qYzU"
+API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
 # --- PROMPTS ---
 
@@ -374,9 +374,9 @@ def evaluate_predictions(results, gt_path):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--api_key", default=API_KEY,
-                        help="Google AI Studio API key")
-    parser.add_argument("--model_name", default="gemini-1.5-pro",
-                        help="Gemini model name")
+                        help="Google AI Studio API key (defaults to GOOGLE_API_KEY env var)")
+    parser.add_argument("--model_name", default="gemini-1.5-flash",
+                        help="Gemini model name (default: gemini-1.5-flash)")
     parser.add_argument("--data_folders", nargs="+",
                         default=[
                             "data/raw/dyspnea-clinical-notes",
