@@ -20,7 +20,7 @@ except ImportError:
 import google.generativeai as genai
 
 # --- CONFIG ---
-API_KEY = "AIzaSyAkgKha4IxsCjRXbeirhyoygT9Qmr4qYzU"
+API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
 # --- PROMPTS ---
 
@@ -75,7 +75,7 @@ def chunk_data(data, size):
         yield data[i:i + size]
 
 
-async def generate_async(prompt, model, max_retries=3, initial_delay=1):
+async def generate_async(prompt, model, max_retries=5, initial_delay=2):
     """Call Gemini via google-generativeai SDK (async-safe)."""
     loop = asyncio.get_event_loop()
     for attempt in range(max_retries):
@@ -90,18 +90,26 @@ async def generate_async(prompt, model, max_retries=3, initial_delay=1):
                 )
             )
             try:
-                json_response = json.loads(response.text)
+                # Basic sanitization for potential markdown blocks in response
+                text = response.text.strip()
+                if text.startswith("```json"):
+                    text = text.split("```json")[1].split("```")[0].strip()
+                elif text.startswith("```"):
+                    text = text.split("```")[1].split("```")[0].strip()
+
+                json_response = json.loads(text)
                 return json_response
             except json.JSONDecodeError:
-                print(f"Generated content is not valid JSON. Retrying...")
+                print(f"Generated content is not valid JSON. Retrying (Attempt {attempt+1}/{max_retries})...")
                 continue
 
         except Exception as e:
-            error_message = str(e)
-            if "429" in error_message or "500" in error_message:
+            error_message = str(e).lower()
+            # Catch 429 (ResourceExhausted), 500, 503, etc.
+            if any(code in error_message for code in ["429", "resource_exhausted", "quota", "500", "503", "504"]):
                 if attempt < max_retries - 1:
                     delay = initial_delay * (2 ** attempt)
-                    print(f"Rate limit / server error. Retrying in {delay}s...")
+                    print(f"Rate limit or server error ({error_message[:50]}...). Retrying in {delay}s...")
                     await asyncio.sleep(delay)
                 else:
                     print(f"Max retries reached.")
@@ -166,6 +174,58 @@ async def process_patient(model, builder, patient_data, target_items, valid_opti
 
 
 # ---------------------------------------------------------------------------
+#  SUBMISSION FORMATTING
+# ---------------------------------------------------------------------------
+
+def format_as_official_submission(results, target_items, language="en"):
+    """
+    Converts internal results into official Codabench JSONL format.
+    Ensures ALL target_items are present and raw text is excluded.
+    """
+    submission_records = []
+
+    # Build lookup for results - use stripped IDs
+    results_lookup = {str(r['patient_id']).strip(): r.get('predictions', {}) for r in results}
+
+    for pid, predictions in results_lookup.items():
+        # Remove language suffix if already present in pid to avoid e.g. 123_en_en
+        base_pid = pid.split('_')[0]
+        doc_id = f"{base_pid}_{language}"
+
+        # Case-insensitive lookup for predictions
+        norm_predictions = {str(k).lower().strip(): v for k, v in predictions.items()}
+
+        pred_list = []
+        for item in target_items:
+            item_lower = item.lower().strip()
+            # Look up prediction for this item (case-insensitive)
+            val_obj = norm_predictions.get(item_lower, "unknown")
+
+            # Extract value if it's a dict (our internal format)
+            if isinstance(val_obj, dict):
+                val = val_obj.get("value", "unknown")
+            else:
+                val = str(val_obj)
+
+            # Normalize predicted value
+            val = val.strip().lower() if val else "unknown"
+            if not val:
+                val = "unknown"
+
+            pred_list.append({
+                "item": item,
+                "prediction": val
+            })
+
+        submission_records.append({
+            "document_id": doc_id,
+            "predictions": pred_list
+        })
+
+    return submission_records
+
+
+# ---------------------------------------------------------------------------
 #  EVALUATION -- Accuracy & F1 Scoring
 # ---------------------------------------------------------------------------
 
@@ -190,19 +250,23 @@ def evaluate_predictions(results, gt_path):
             if not line:
                 continue
             rec = json.loads(line)
-            doc_id = str(rec['document_id'])
+            # Use base ID for matching
+            doc_id = str(rec['document_id']).strip().split('_')[0]
             gt[doc_id] = {a['item']: a['ground_truth'] for a in rec.get('annotations', [])}
 
     # --- Build prediction lookup ---
     preds = {}
     for r in results:
-        doc_id = str(r.get('patient_id', 'unknown'))
+        # Use base ID for matching
+        doc_id = str(r.get('patient_id', 'unknown')).strip().split('_')[0]
         items = {}
         for item_name, item_val in r.get('predictions', {}).items():
+            # Store keys in lowercase for case-insensitive matching
+            key = str(item_name).lower().strip()
             if isinstance(item_val, dict):
-                items[item_name] = item_val.get('value', str(item_val))
+                items[key] = item_val.get('value', str(item_val))
             else:
-                items[item_name] = str(item_val)
+                items[key] = str(item_val)
         preds[doc_id] = items
 
     # --- Collect all unique items ---
@@ -225,7 +289,8 @@ def evaluate_predictions(results, gt_path):
 
         for item_name, gt_val in gt_items.items():
             gt_norm = _normalise(gt_val)
-            pred_val = pred_items.get(item_name)
+            # Match item name in lowercase
+            pred_val = pred_items.get(item_name.lower().strip())
             pred_norm = _normalise(pred_val) if pred_val is not None else ""
 
             total_comparisons += 1
@@ -309,25 +374,33 @@ def evaluate_predictions(results, gt_path):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--api_key", default=API_KEY,
-                        help="Google AI Studio API key")
-    parser.add_argument("--model_name", default="gemini-1.5-pro",
-                        help="Gemini model name")
+                        help="Google AI Studio API key (defaults to GOOGLE_API_KEY env var)")
+    parser.add_argument("--model_name", default="gemini-1.5-flash",
+                        help="Gemini model name (default: gemini-1.5-flash)")
     parser.add_argument("--data_folders", nargs="+",
                         default=[
-                            r"C:\Users\sai78\Desktop\Clinical_CRF_filling\data\raw\dyspnea-clinical-notes",
-                            r"C:\Users\sai78\Desktop\Clinical_CRF_filling\data\raw\dyspnea-crf-development",
+                            "data/raw/dyspnea-clinical-notes",
+                            "data/raw/dyspnea-crf-development",
                         ],
                         help="Directories containing .parquet shards (searched recursively)")
     parser.add_argument("--gt_file",
-                        default=r"C:\Users\sai78\Desktop\Clinical_CRF_filling\data\raw\dev_gt.jsonl")
+                        default="data/raw/dev_gt.jsonl")
     parser.add_argument("--options_folder",
-                        default=r"C:\Users\sai78\Desktop\Clinical_CRF_filling\data\raw\dyspnea-valid-options\dyspnea-valid-options\data")
+                        default="data/raw/dyspnea-valid-options")
     parser.add_argument("--output_file",
-                        default="data/processed/materialized_ehr/submission.json")
+                        default="data/processed/materialized_ehr/pipeline_results.json",
+                        help="Path to save internal pipeline results (with debug info)")
+    parser.add_argument("--submission_file",
+                        default="submission/mock_data_dev_codabench.jsonl",
+                        help="Path to save official Codabench submission JSONL")
+    parser.add_argument("--language", default="en", choices=["en", "it"],
+                        help="Language suffix for submission document IDs")
     parser.add_argument("--skip_eval", action="store_true",
                         help="Skip evaluation after generating predictions")
-    parser.add_argument("--concurrency", type=int, default=5,
-                        help="Max concurrent LLM calls (free tier: keep at 5)")
+    parser.add_argument("--concurrency", type=int, default=2,
+                        help="Max concurrent patient processing (free tier: keep low)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Limit number of patients to process (for testing)")
     # --- RAG options ---
     parser.add_argument("--use_rag", action="store_true",
                         help="Use RAG-guided extraction (retrieves relevant tuples per CRF item)")
@@ -354,6 +427,9 @@ async def main():
     valid_options = loader.load_valid_options(args.options_folder)
 
     merged_data = loader.load_and_merge()
+
+    if args.limit:
+        merged_data = merged_data[:args.limit]
 
     if not merged_data:
         print("No data found. Exiting.")
@@ -398,14 +474,24 @@ async def main():
     results = await asyncio.gather(*tasks)
     results = [r for r in results if r is not None]
 
-    # 4. Save
+    # 4. Save Internal Results
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     with open(args.output_file, 'w') as f:
         json.dump(results, f, indent=2)
+    print(f"\nPipeline results saved to {args.output_file}")
 
-    print(f"\nDone! {len(results)} results saved to {args.output_file}")
+    # 5. Generate and Save Official Submission
+    if args.submission_file:
+        print(f"Generating official submission format ({args.language})...")
+        submission_data = format_as_official_submission(results, target_items, args.language)
 
-    # 5. Evaluate against GT
+        os.makedirs(os.path.dirname(args.submission_file) or ".", exist_ok=True)
+        with open(args.submission_file, 'w', encoding='utf-8') as f:
+            for rec in submission_data:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        print(f"Official submission saved to {args.submission_file}")
+
+    # 6. Evaluate against GT
     if not args.skip_eval:
         print("\nRunning evaluation against ground truth...")
         overall, _ = evaluate_predictions(results, args.gt_file)
